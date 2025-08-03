@@ -1,110 +1,93 @@
 export default async function handler(req, res) {
-  if (req.method === "POST") {
-    try {
-      // Handle Slack URL verification
-      if (req.headers['content-type'] === 'application/json') {
-        const payload = req.body;
+  const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+  const MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/ykabcsya46s2e2u6k859yvhi2e20ouwi';
 
-        if (payload.type === 'url_verification') {
-          return res.status(200).send(payload.challenge);
-        }
+  // Respond to Slack verification
+  if (req.body.type === 'url_verification') {
+    return res.status(200).send(req.body.challenge);
+  }
 
-        if (payload.type === 'view_submission') {
-          const user = payload.user.username || payload.user.name || payload.user.id;
-          const value = payload.view.state.values.score_block.score_selection.selected_option.value;
-          const timestamp = new Date().toISOString();
+  // Parse payload from Slack
+  let payload = req.body;
+  if (req.headers['content-type'] === 'application/x-www-form-urlencoded') {
+    const querystring = require('querystring');
+    payload = JSON.parse(querystring.parse(req.body).payload);
+  }
 
-          // Send to Make.com webhook
-          await fetch("https://hook.eu2.make.com/ykabcsya46s2e2u6k859yvhi2e20ouwi", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ timestamp, user, value }),
-          });
-
-          // Close modal
-          return res.status(200).json({ response_action: "clear" });
-        }
-
-        return res.status(200).json({ ok: true });
-      }
-
-      // Handle Slash command
-      if (req.headers['content-type'] === 'application/x-www-form-urlencoded') {
-        const body = new URLSearchParams(await streamToString(req)).entries();
-        const params = Object.fromEntries(body);
-        const trigger_id = params.trigger_id;
-
-        const modal = {
-          trigger_id: trigger_id,
-          view: {
-            type: "modal",
-            callback_id: "teampulse_response",
-            title: { type: "plain_text", text: "TeamPulse" },
-            submit: { type: "plain_text", text: "Submit" },
-            close: { type: "plain_text", text: "Cancel" },
-            blocks: [
-              {
-                type: "section",
-                text: {
-                  type: "mrkdwn",
-                  text: "*How much do you agree with this statement?*\n\n_\"I felt safe to speak up or disagree, even with leads or founders.\"_"
-                }
-              },
-              {
-                type: "input",
-                block_id: "score_block",
-                label: { type: "plain_text", text: "Your answer" },
-                element: {
-                  type: "static_select",
-                  action_id: "score_selection",
-                  placeholder: { type: "plain_text", text: "Select a score" },
-                  options: [
-                    { text: { type: "plain_text", text: "1 – Strongly disagree" }, value: "1" },
-                    { text: { type: "plain_text", text: "2 – Disagree" }, value: "2" },
-                    { text: { type: "plain_text", text: "3 – Neutral" }, value: "3" },
-                    { text: { type: "plain_text", text: "4 – Agree" }, value: "4" },
-                    { text: { type: "plain_text", text: "5 – Strongly agree" }, value: "5" }
-                  ]
-                }
-              }
-            ]
+  // Slash command: open modal
+  if (req.body.command === '/pulse') {
+    const modalView = {
+      type: 'modal',
+      callback_id: 'teampulse_submission',
+      title: {
+        type: 'plain_text',
+        text: 'TeamPulse',
+      },
+      submit: {
+        type: 'plain_text',
+        text: 'Submit',
+      },
+      close: {
+        type: 'plain_text',
+        text: 'Cancel',
+      },
+      blocks: [
+        {
+          type: 'input',
+          block_id: 'q1',
+          label: { type: 'plain_text', text: 'How focused was the team today?' },
+          element: {
+            type: 'static_select',
+            action_id: 'score',
+            options: [1, 2, 3, 4, 5].map(n => ({
+              text: { type: 'plain_text', text: `${n}` },
+              value: `${n}`
+            }))
           }
-        };
-
-        // Call Slack API to open the modal
-        const slackRes = await fetch('https://slack.com/api/views.open', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}`
-          },
-          body: JSON.stringify(modal)
-        });
-
-        const result = await slackRes.json();
-        if (!result.ok) {
-          console.error("Slack error:", result);
         }
+        // Add more questions as needed here
+      ]
+    };
 
-        // Respond quickly to slash command
-        return res.status(200).send('');
-      }
+    const result = await fetch('https://slack.com/api/views.open', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        trigger_id: req.body.trigger_id,
+        view: modalView
+      })
+    });
 
-      return res.status(200).json({ ok: true });
-    } catch (error) {
-      console.error("Error in Slack handler:", error);
-      return res.status(500).json({ error: "Internal Server Error" });
-    }
+    return res.status(200).end(); // must respond in <3s
   }
 
-  res.status(405).json({ error: "Method Not Allowed" });
-}
+  // Modal submission
+  if (payload.type === 'view_submission' && payload.view.callback_id === 'teampulse_submission') {
+    const user = payload.user.username || payload.user.id;
+    const values = payload.view.state.values;
 
-// Helper function to read stream (needed for urlencoded body)
-async function streamToString(req) {
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
+    const parsedAnswers = Object.entries(values).map(([questionId, val]) => {
+      const action = Object.values(val)[0];
+      return { questionId, answer: action.selected_option.value };
+    });
+
+    // Forward answers to Make.com
+    await fetch(MAKE_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user,
+        answers: parsedAnswers,
+        timestamp: new Date().toISOString()
+      })
+    });
+
+    return res.status(200).json({ response_action: 'clear' });
   }
-  return Buffer.concat(chunks).toString('utf-8');
+
+  // Default fallback
+  return res.status(200).send('No action taken');
 }
