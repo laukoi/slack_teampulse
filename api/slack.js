@@ -1,93 +1,98 @@
 export default async function handler(req, res) {
-  const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-  const MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/ykabcsya46s2e2u6k859yvhi2e20ouwi';
+  try {
+    if (req.method !== 'POST') {
+      return res.status(405).send('Method Not Allowed');
+    }
 
-  // Respond to Slack verification
-  if (req.body.type === 'url_verification') {
-    return res.status(200).send(req.body.challenge);
-  }
+    const contentType = req.headers['content-type'];
 
-  // Parse payload from Slack
-  let payload = req.body;
-  if (req.headers['content-type'] === 'application/x-www-form-urlencoded') {
-    const querystring = require('querystring');
-    payload = JSON.parse(querystring.parse(req.body).payload);
-  }
+    // Slash command
+    if (contentType === 'application/x-www-form-urlencoded') {
+      const bodyText = await getRawBody(req);
+      const params = new URLSearchParams(bodyText.toString());
+      const trigger_id = params.get('trigger_id');
 
-  // Slash command: open modal
-  if (req.body.command === '/pulse') {
-    const modalView = {
-      type: 'modal',
-      callback_id: 'teampulse_submission',
-      title: {
-        type: 'plain_text',
-        text: 'TeamPulse',
-      },
-      submit: {
-        type: 'plain_text',
-        text: 'Submit',
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-      },
-      blocks: [
-        {
-          type: 'input',
-          block_id: 'q1',
-          label: { type: 'plain_text', text: 'How focused was the team today?' },
-          element: {
-            type: 'static_select',
-            action_id: 'score',
-            options: [1, 2, 3, 4, 5].map(n => ({
-              text: { type: 'plain_text', text: `${n}` },
-              value: `${n}`
-            }))
+      // Send modal async (do not wait)
+      fetch('https://slack.com/api/views.open', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}`
+        },
+        body: JSON.stringify({
+          trigger_id,
+          view: {
+            type: "modal",
+            callback_id: "teampulse_response",
+            title: { type: "plain_text", text: "TeamPulse" },
+            submit: { type: "plain_text", text: "Submit" },
+            close: { type: "plain_text", text: "Cancel" },
+            blocks: [
+              {
+                type: "section",
+                text: {
+                  type: "mrkdwn",
+                  text: "*How much do you agree with this statement?*\n\n_\"I felt safe to speak up or disagree, even with leads or founders.\"_"
+                }
+              },
+              {
+                type: "input",
+                block_id: "score_block",
+                label: { type: "plain_text", text: "Your answer" },
+                element: {
+                  type: "static_select",
+                  action_id: "score_selection",
+                  placeholder: { type: "plain_text", text: "Select a score" },
+                  options: [
+                    { text: { type: "plain_text", text: "1 – Strongly disagree" }, value: "1" },
+                    { text: { type: "plain_text", text: "2 – Disagree" }, value: "2" },
+                    { text: { type: "plain_text", text: "3 – Neutral" }, value: "3" },
+                    { text: { type: "plain_text", text: "4 – Agree" }, value: "4" },
+                    { text: { type: "plain_text", text: "5 – Strongly agree" }, value: "5" }
+                  ]
+                }
+              }
+            ]
           }
-        }
-        // Add more questions as needed here
-      ]
-    };
+        })
+      }).catch(err => console.error("Slack modal error:", err));
 
-    const result = await fetch('https://slack.com/api/views.open', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        trigger_id: req.body.trigger_id,
-        view: modalView
-      })
-    });
+      // Respond immediately to Slack
+      return res.status(200).send('');
+    }
 
-    return res.status(200).end(); // must respond in <3s
+    // Interactivity (modal submission)
+    if (contentType === 'application/json') {
+      const payload = req.body;
+
+      if (payload?.type === 'view_submission') {
+        const user = payload.user.id;
+        const value = payload.view.state.values.score_block.score_selection.selected_option.value;
+        const timestamp = new Date().toISOString();
+
+        // Send to Google Sheet or Make.com webhook here
+        // ...
+
+        return res.status(200).json({ response_action: "clear" });
+      }
+
+      return res.status(200).send('Unhandled payload');
+    }
+
+    return res.status(200).send('OK');
+  } catch (err) {
+    console.error("Handler error:", err);
+    return res.status(500).send("Internal Server Error");
   }
+}
 
-  // Modal submission
-  if (payload.type === 'view_submission' && payload.view.callback_id === 'teampulse_submission') {
-    const user = payload.user.username || payload.user.id;
-    const values = payload.view.state.values;
-
-    const parsedAnswers = Object.entries(values).map(([questionId, val]) => {
-      const action = Object.values(val)[0];
-      return { questionId, answer: action.selected_option.value };
-    });
-
-    // Forward answers to Make.com
-    await fetch(MAKE_WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user,
-        answers: parsedAnswers,
-        timestamp: new Date().toISOString()
-      })
-    });
-
-    return res.status(200).json({ response_action: 'clear' });
-  }
-
-  // Default fallback
-  return res.status(200).send('No action taken');
+// Helper to read raw body from request stream
+import { Readable } from 'stream';
+function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', chunk => (data += chunk));
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
 }
